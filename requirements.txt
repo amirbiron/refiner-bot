@@ -1,0 +1,18 @@
+# Telegram Bot Framework (latest stable - Jan 2026)
+python-telegram-bot==22.6
+
+# Google Gemini AI - NEW unified SDK (REQUIRED!)
+google-genai==1.0.1
+
+# MongoDB Driver (optional - for future features)
+pymongo==4.16.0
+
+# Web framework (for webhook mode)
+Flask==3.1.0
+gunicorn==23.0.0
+
+# Environment variables
+python-dotenv==1.0.1
+
+# Logging and utilities
+python-dateutil==2.9.0
