@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -72,6 +73,28 @@ def _get_gemini_client():
 def get_gemini_client():
     """Public function to get the Gemini client"""
     return _get_gemini_client()
+
+def markdown_to_html(text: str) -> str:
+    """
+    המרת Markdown בסיסי ל-HTML לשליחה בטלגרם
+    תומך ב: **bold**, *italic*, `code`
+    """
+    # Escape HTML special characters first (but not our formatting)
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    
+    # המרת **bold** ל-<b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    
+    # המרת *italic* ל-<i>italic</i> (רק כוכבית בודדת)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+    
+    # המרת `code` ל-<code>code</code>
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+    
+    return text
+
 
 # הפרומפט המושלם לשכתוב
 REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערוצי טלגרם בעברית.
@@ -213,19 +236,18 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה - קודם שולחים, רק אחרי הצלחה מוחקים!
-        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
-        
-        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
+        # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
         try:
+            html_text = f"✨ גרסה משוכתבת:\n\n{markdown_to_html(refined_text)}"
             await message.reply_text(
-                result_text,
+                html_text,
                 reply_markup=reply_markup,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
-            # שלח בלי Markdown אם יש בעיה עם התווים
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed, sending plain text: {html_err}")
+            result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
             await message.reply_text(
                 result_text,
                 reply_markup=reply_markup
@@ -263,6 +285,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     """
     טיפול בהודעות טקסט רגילות (לא forwarded) - שכתוב עם AI
     """
+    logger.info(f"📨 Received regular text message from user {update.effective_user.id}")
     reporter.report_activity(update.effective_user.id)
     message = update.message
     
@@ -278,9 +301,11 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     if len(message.text.strip()) < 10:
         await message.reply_text(
             "⚠️ הטקסט קצר מדי לשכתוב.\n"
-            "אנא שלח טקסט ארוך יותר."
+            "אנא שלח טקסט ארוך יותר (לפחות 10 תווים)."
         )
         return
+    
+    logger.info(f"📝 Processing regular text of length: {len(message.text)}")
     
     # הודעת המתנה
     processing_msg = await message.reply_text("⏳ משכתב את הטקסט עם AI...")
@@ -292,7 +317,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         
         # יצירת כפתור פרסום
         keyboard = [
-            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data=f"publish")]
+            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -300,18 +325,18 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה
-        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
-        
-        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
+        # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
         try:
+            html_text = f"✨ גרסה משוכתבת:\n\n{markdown_to_html(refined_text)}"
             await message.reply_text(
-                result_text,
+                html_text,
                 reply_markup=reply_markup,
-                parse_mode="Markdown"
+                parse_mode="HTML"
             )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed, sending plain text: {html_err}")
+            result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
             await message.reply_text(
                 result_text,
                 reply_markup=reply_markup
@@ -369,15 +394,17 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         return
     
     try:
-        # פרסום לערוץ - נסה עם Markdown, אם נכשל - בלי
+        # פרסום לערוץ עם HTML formatting
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
         try:
+            html_text = markdown_to_html(refined_text)
             await context.bot.send_message(
                 chat_id=CHANNEL_USERNAME,
-                text=refined_text,
-                parse_mode="Markdown"
+                text=html_text,
+                parse_mode="HTML"
             )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed for channel, sending without: {md_err}")
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed for channel, sending plain: {html_err}")
             await context.bot.send_message(
                 chat_id=CHANNEL_USERNAME,
                 text=refined_text

@@ -61,6 +61,7 @@ from bot import (
     help_command,
     refine_text_with_gemini,
     handle_forwarded_message,
+    handle_regular_text_message,
     publish_to_channel_callback,
     error_handler
 )
@@ -120,6 +121,11 @@ def _build_telegram_app():
     app.add_handler(MessageHandler(
         filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
         handle_forwarded_message
+    ))
+    # Handler for regular text messages (not forwarded)
+    app.add_handler(MessageHandler(
+        (~filters.FORWARDED) & filters.TEXT & (~filters.COMMAND),
+        handle_regular_text_message
     ))
     app.add_handler(CallbackQueryHandler(
         publish_to_channel_callback,
