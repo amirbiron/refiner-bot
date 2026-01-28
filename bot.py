@@ -4,6 +4,7 @@
 """
 
 import os
+import re
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -72,6 +73,28 @@ def _get_gemini_client():
 def get_gemini_client():
     """Public function to get the Gemini client"""
     return _get_gemini_client()
+
+def markdown_to_html(text: str) -> str:
+    """
+    המרת Markdown בסיסי ל-HTML לשליחה בטלגרם
+    תומך ב: **bold**, *italic*, `code`
+    """
+    # Escape HTML special characters first (but not our formatting)
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;')
+    text = text.replace('>', '&gt;')
+    
+    # המרת **bold** ל-<b>bold</b>
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    
+    # המרת *italic* ל-<i>italic</i> (רק כוכבית בודדת)
+    text = re.sub(r'(?<!\*)\*(?!\*)(.+?)(?<!\*)\*(?!\*)', r'<i>\1</i>', text)
+    
+    # המרת `code` ל-<code>code</code>
+    text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
+    
+    return text
+
 
 # הפרומפט המושלם לשכתוב
 REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערוצי טלגרם בעברית.
@@ -213,13 +236,22 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה - ללא parse_mode כדי להימנע מבעיות Markdown
-        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
-        
-        await message.reply_text(
-            result_text,
-            reply_markup=reply_markup
-        )
+        # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
+        try:
+            html_text = f"✨ גרסה משוכתבת:\n\n{markdown_to_html(refined_text)}"
+            await message.reply_text(
+                html_text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed, sending plain text: {html_err}")
+            result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup
+            )
         
         # מחיקת הודעת ההמתנה - רק אחרי שהתשובה נשלחה בהצלחה!
         try:
@@ -293,13 +325,22 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה - ללא parse_mode כדי להימנע מבעיות Markdown
-        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
-        
-        await message.reply_text(
-            result_text,
-            reply_markup=reply_markup
-        )
+        # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
+        try:
+            html_text = f"✨ גרסה משוכתבת:\n\n{markdown_to_html(refined_text)}"
+            await message.reply_text(
+                html_text,
+                reply_markup=reply_markup,
+                parse_mode="HTML"
+            )
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed, sending plain text: {html_err}")
+            result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup
+            )
         
         # מחיקת הודעת ההמתנה
         try:
@@ -353,11 +394,21 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         return
     
     try:
-        # פרסום לערוץ - ללא parse_mode כדי להימנע מבעיות Markdown
-        await context.bot.send_message(
-            chat_id=CHANNEL_USERNAME,
-            text=refined_text
-        )
+        # פרסום לערוץ עם HTML formatting
+        # נסה לשלוח עם HTML, אם נכשל - שלח בלי פורמט
+        try:
+            html_text = markdown_to_html(refined_text)
+            await context.bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=html_text,
+                parse_mode="HTML"
+            )
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed for channel, sending plain: {html_err}")
+            await context.bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=refined_text
+            )
         
         await query.edit_message_text(
             f"✅ פורסם בהצלחה לערוץ {CHANNEL_USERNAME}!\n\n"
