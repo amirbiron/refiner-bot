@@ -116,6 +116,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     help_text = """📖 **עזרה - בוט המשכתב**
 
 🔄 **שימוש:**
+• שלח טקסט רגיל → אני משכתב אותו
 • Forward הודעה מערוץ אחר → אני משכתב אותה
 • לחץ על "📢 פרסם לערוץ" → מפרסם ישירות
 
@@ -258,6 +259,90 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
                 logger.error(f"Could not send error reply: {reply_err}")
 
 
+async def handle_regular_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    טיפול בהודעות טקסט רגילות (לא forwarded) - שכתוב עם AI
+    """
+    reporter.report_activity(update.effective_user.id)
+    message = update.message
+    
+    # בדיקה שיש טקסט
+    if not message.text:
+        await message.reply_text(
+            "⚠️ אני יכול לעבוד רק עם טקסט.\n"
+            "אנא שלח הודעת טקסט."
+        )
+        return
+    
+    # בדיקה שהטקסט מספיק ארוך לשכתוב
+    if len(message.text.strip()) < 10:
+        await message.reply_text(
+            "⚠️ הטקסט קצר מדי לשכתוב.\n"
+            "אנא שלח טקסט ארוך יותר."
+        )
+        return
+    
+    # הודעת המתנה
+    processing_msg = await message.reply_text("⏳ משכתב את הטקסט עם AI...")
+    
+    try:
+        # שכתוב הטקסט
+        original_text = message.text
+        refined_text = await refine_text_with_gemini(original_text)
+        
+        # יצירת כפתור פרסום
+        keyboard = [
+            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data=f"publish")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # שמירת הטקסט המשוכתב ב-context
+        context.user_data['last_refined_text'] = refined_text
+        context.user_data['refined_at'] = datetime.now()
+        
+        # שליחת התוצאה
+        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
+        
+        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
+        try:
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        except Exception as md_err:
+            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup
+            )
+        
+        # מחיקת הודעת ההמתנה
+        try:
+            await processing_msg.delete()
+        except Exception as del_err:
+            logger.warning(f"Could not delete processing message: {del_err}")
+        
+        logger.info(f"✅ Regular text refined successfully for user {message.from_user.id}")
+        
+    except Exception as e:
+        logger.error(f"Error in handle_regular_text_message: {e}")
+        
+        error_message = (
+            f"❌ שגיאה בשכתוב הטקסט:\n{str(e)}\n\n"
+            "נסה שוב מאוחר יותר."
+        )
+        
+        try:
+            await processing_msg.edit_text(error_message)
+        except Exception as edit_err:
+            logger.warning(f"Could not edit processing message: {edit_err}")
+            try:
+                await message.reply_text(error_message)
+            except Exception as reply_err:
+                logger.error(f"Could not send error reply: {reply_err}")
+
+
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     טיפול בלחיצה על כפתור "פרסם לערוץ"
@@ -346,6 +431,11 @@ def main():
     app.add_handler(MessageHandler(
         filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
         handle_forwarded_message
+    ))
+    # Handler for regular text messages (not forwarded)
+    app.add_handler(MessageHandler(
+        ~filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
+        handle_regular_text_message
     ))
     app.add_handler(CallbackQueryHandler(
         publish_to_channel_callback,
