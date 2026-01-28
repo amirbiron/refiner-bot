@@ -213,23 +213,13 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה - קודם שולחים, רק אחרי הצלחה מוחקים!
+        # שליחת התוצאה - ללא parse_mode כדי להימנע מבעיות Markdown
         result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
         
-        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
-        try:
-            await message.reply_text(
-                result_text,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
-            # שלח בלי Markdown אם יש בעיה עם התווים
-            await message.reply_text(
-                result_text,
-                reply_markup=reply_markup
-            )
+        await message.reply_text(
+            result_text,
+            reply_markup=reply_markup
+        )
         
         # מחיקת הודעת ההמתנה - רק אחרי שהתשובה נשלחה בהצלחה!
         try:
@@ -263,6 +253,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     """
     טיפול בהודעות טקסט רגילות (לא forwarded) - שכתוב עם AI
     """
+    logger.info(f"📨 Received regular text message from user {update.effective_user.id}")
     reporter.report_activity(update.effective_user.id)
     message = update.message
     
@@ -278,9 +269,11 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     if len(message.text.strip()) < 10:
         await message.reply_text(
             "⚠️ הטקסט קצר מדי לשכתוב.\n"
-            "אנא שלח טקסט ארוך יותר."
+            "אנא שלח טקסט ארוך יותר (לפחות 10 תווים)."
         )
         return
+    
+    logger.info(f"📝 Processing regular text of length: {len(message.text)}")
     
     # הודעת המתנה
     processing_msg = await message.reply_text("⏳ משכתב את הטקסט עם AI...")
@@ -292,7 +285,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         
         # יצירת כפתור פרסום
         keyboard = [
-            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data=f"publish")]
+            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -300,22 +293,13 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # שליחת התוצאה
+        # שליחת התוצאה - ללא parse_mode כדי להימנע מבעיות Markdown
         result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
         
-        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
-        try:
-            await message.reply_text(
-                result_text,
-                reply_markup=reply_markup,
-                parse_mode="Markdown"
-            )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
-            await message.reply_text(
-                result_text,
-                reply_markup=reply_markup
-            )
+        await message.reply_text(
+            result_text,
+            reply_markup=reply_markup
+        )
         
         # מחיקת הודעת ההמתנה
         try:
@@ -369,19 +353,11 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         return
     
     try:
-        # פרסום לערוץ - נסה עם Markdown, אם נכשל - בלי
-        try:
-            await context.bot.send_message(
-                chat_id=CHANNEL_USERNAME,
-                text=refined_text,
-                parse_mode="Markdown"
-            )
-        except Exception as md_err:
-            logger.warning(f"Markdown failed for channel, sending without: {md_err}")
-            await context.bot.send_message(
-                chat_id=CHANNEL_USERNAME,
-                text=refined_text
-            )
+        # פרסום לערוץ - ללא parse_mode כדי להימנע מבעיות Markdown
+        await context.bot.send_message(
+            chat_id=CHANNEL_USERNAME,
+            text=refined_text
+        )
         
         await query.edit_message_text(
             f"✅ פורסם בהצלחה לערוץ {CHANNEL_USERNAME}!\n\n"
