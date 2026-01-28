@@ -87,10 +87,11 @@ TELEGRAM_BOT_TOKEN = <הטוקן שלך>
 GEMINI_API_KEY = <המפתח שלך>
 CHANNEL_USERNAME = @your_channel
 WEBHOOK_URL = https://refiner-bot.onrender.com
+WEBHOOK_PATH = webhook  # אופציונלי (אם ריק, משתמש בטוקן)
 PORT = 10000
 ```
 
-⚠️ **חשוב:** `WEBHOOK_URL` צריך להיות ה-URL של השרת ב-Render!
+⚠️ **חשוב:** `WEBHOOK_URL` צריך להיות ה-URL של השרת ב-Render (ללא / בסוף)
 
 ### שלב 6: Deploy!
 

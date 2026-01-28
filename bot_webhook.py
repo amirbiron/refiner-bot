@@ -7,6 +7,7 @@ import os
 import logging
 import asyncio
 import threading
+from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime
 from flask import Flask, request, jsonify
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 WEBHOOK_URL = (os.getenv("WEBHOOK_URL") or "").rstrip("/")  # https://your-app.onrender.com
+WEBHOOK_PATH = (os.getenv("WEBHOOK_PATH") or TELEGRAM_BOT_TOKEN or "").lstrip("/")
 PORT = int(os.getenv("PORT", 10000))
 
 if not TELEGRAM_BOT_TOKEN:
@@ -51,9 +53,16 @@ if not GEMINI_API_KEY:
     raise ValueError("❌ GEMINI_API_KEY not set!")
 if not WEBHOOK_URL:
     raise ValueError("❌ WEBHOOK_URL not set!")
+if not WEBHOOK_PATH:
+    raise ValueError("❌ WEBHOOK_PATH not set!")
 
-WEBHOOK_PATH = TELEGRAM_BOT_TOKEN
 WEBHOOK_FULL_URL = f"{WEBHOOK_URL}/{WEBHOOK_PATH}"
+
+
+def _mask_webhook_url(url: str) -> str:
+    if TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_TOKEN in url:
+        return url.replace(TELEGRAM_BOT_TOKEN, "<TOKEN>")
+    return url
 
 # יצירת Flask app
 app = Flask(__name__)
@@ -65,6 +74,7 @@ _telegram_started = False
 _loop = None
 _loop_thread = None
 _loop_ready = threading.Event()
+_start_lock = threading.Lock()
 _setup_lock = threading.Lock()
 _setup_done = False
 
@@ -89,9 +99,9 @@ def _submit_coroutine(coro):
     return asyncio.run_coroutine_threadsafe(coro, _loop)
 
 
-def _run_coroutine(coro):
+def _run_coroutine(coro, timeout=None):
     future = _submit_coroutine(coro)
-    return future.result()
+    return future.result(timeout=timeout)
 
 
 def _build_telegram_app():
@@ -125,8 +135,20 @@ async def setup_webhook():
     הגדרת webhook ב-Telegram
     """
     await _start_telegram_app()
-    await telegram_app.bot.set_webhook(url=WEBHOOK_FULL_URL)
-    logger.info("✅ Webhook set to: %s", WEBHOOK_FULL_URL)
+    await asyncio.wait_for(
+        telegram_app.bot.set_webhook(url=WEBHOOK_FULL_URL),
+        timeout=10
+    )
+    logger.info("✅ Webhook set to: %s", _mask_webhook_url(WEBHOOK_FULL_URL))
+
+
+def ensure_app_started():
+    if _telegram_started:
+        return
+    with _start_lock:
+        if _telegram_started:
+            return
+        _run_coroutine(_start_telegram_app(), timeout=15)
 
 
 def ensure_webhook():
@@ -136,7 +158,8 @@ def ensure_webhook():
     with _setup_lock:
         if _setup_done:
             return
-        _run_coroutine(setup_webhook())
+        ensure_app_started()
+        _run_coroutine(setup_webhook(), timeout=15)
         _setup_done = True
 
 
@@ -170,9 +193,10 @@ def webhook():
     Webhook endpoint לקבלת עדכונים מטלגרם
     """
     try:
-        ensure_webhook()
+        ensure_app_started()
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, telegram_app.bot)
+        logger.info("📩 Webhook update received: %s", update.update_id)
         future = _submit_coroutine(telegram_app.process_update(update))
         future.add_done_callback(_log_future_error)
         return jsonify({"ok": True}), 200
@@ -189,12 +213,18 @@ def set_webhook_route():
     global _setup_done
     try:
         with _setup_lock:
-            _run_coroutine(setup_webhook())
+            _run_coroutine(setup_webhook(), timeout=15)
             _setup_done = True
         return jsonify({
             "status": "success",
-            "webhook_url": WEBHOOK_FULL_URL
+            "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
         })
+    except FutureTimeout:
+        logger.error("Webhook setup timed out")
+        return jsonify({
+            "status": "error",
+            "error": "Timeout while setting webhook"
+        }), 504
     except Exception as e:
         logger.error("Failed to set webhook: %s", e, exc_info=True)
         return jsonify({
@@ -203,21 +233,31 @@ def set_webhook_route():
         }), 500
 
 
+async def _get_webhook_info():
+    await _start_telegram_app()
+    return await asyncio.wait_for(
+        telegram_app.bot.get_webhook_info(),
+        timeout=5
+    )
+
+
 @app.route('/webhook_info', methods=['GET'])
 def webhook_info():
     """
     מידע על ה-webhook הנוכחי
     """
     try:
-        ensure_webhook()
-        info = _run_coroutine(telegram_app.bot.get_webhook_info())
+        ensure_app_started()
+        info = _run_coroutine(_get_webhook_info(), timeout=10)
         return jsonify({
-            "url": info.url,
+            "url": _mask_webhook_url(info.url) if info.url else info.url,
             "has_custom_certificate": info.has_custom_certificate,
             "pending_update_count": info.pending_update_count,
             "last_error_date": info.last_error_date,
             "last_error_message": info.last_error_message
         })
+    except FutureTimeout:
+        return jsonify({"error": "Timeout while contacting Telegram"}), 504
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
@@ -227,7 +267,7 @@ def main():
     הרצת השרת
     """
     logger.info("🤖 Starting Refiner Bot in WEBHOOK mode...")
-    logger.info("📡 Webhook URL: %s", WEBHOOK_FULL_URL)
+    logger.info("📡 Webhook URL: %s", _mask_webhook_url(WEBHOOK_FULL_URL))
 
     ensure_webhook()
     

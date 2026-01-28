@@ -192,12 +192,12 @@ services:
 
 ### אפשרות 2: Webhooks (מומלץ לפרודקשן)
 
-נדרש Flask/FastAPI wrapper - יצירת endpoint כמו:
+קיימת גרסת Webhook מובנית (`bot_webhook.py`).
+ה-URL יהיה:
 ```
-https://your-app.onrender.com/webhook
+https://your-app.onrender.com/<WEBHOOK_PATH>
 ```
-
-אספר אם רוצה שאכתוב גרסת Webhook!
+ברירת מחדל: `WEBHOOK_PATH` הוא הטוקן של הבוט (ניתן לשנות ל-`webhook`).
 
 ---
 
