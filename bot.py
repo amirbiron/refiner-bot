@@ -101,16 +101,8 @@ REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערו�
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בפקודת /start"""
     reporter.report_activity(update.effective_user.id)
-    welcome_message = """👋 שלום! אני **בוט המשכתב**
-
-🎯 **איך אני עובד?**
-1. עשה Forward להודעה שאתה רוצה לשכתב (מערוץ אחר או מכל מקום)
-2. אני אשכתב אותה בעברית זורמת ומקצועית עם Gemini AI
-3. תקבל את הגרסה המשוכתבת עם כפתור "📢 פרסם לערוץ"
-
-⚡ **פשוט, מהיר, מקצועי!**
-
-צריך עזרה? שלח /help"""
+    welcome_message = """👋 שלום! אני **בוט יוצר הפוסטים**
+    בא ניצור משהו יפה."""
     
     await update.message.reply_text(
         welcome_message,
