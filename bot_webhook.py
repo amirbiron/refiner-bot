@@ -76,7 +76,12 @@ _loop_thread = None
 _loop_ready = threading.Event()
 _start_lock = threading.Lock()
 _setup_lock = threading.Lock()
-_setup_done = False
+_start_event = threading.Event()
+_start_in_progress = False
+_start_error = None
+_setup_event = threading.Event()
+_setup_in_progress = False
+_setup_error = None
 
 
 def _loop_runner():
@@ -142,25 +147,67 @@ async def setup_webhook():
     logger.info("✅ Webhook set to: %s", _mask_webhook_url(WEBHOOK_FULL_URL))
 
 
-def ensure_app_started():
-    if _telegram_started:
-        return
-    with _start_lock:
-        if _telegram_started:
-            return
+def _start_worker():
+    global _start_in_progress, _start_error
+    try:
         _run_coroutine(_start_telegram_app(), timeout=15)
+        _start_event.set()
+        _start_error = None
+    except Exception as exc:
+        _start_error = str(exc)
+        logger.error("Failed to start Telegram app: %s", exc, exc_info=True)
+    finally:
+        with _start_lock:
+            _start_in_progress = False
 
 
-def ensure_webhook():
-    global _setup_done
-    if _setup_done:
-        return
-    with _setup_lock:
-        if _setup_done:
-            return
-        ensure_app_started()
+def trigger_app_start(wait=False, timeout=0):
+    if _start_event.is_set():
+        return True
+    global _start_in_progress
+    with _start_lock:
+        if _start_event.is_set():
+            return True
+        if not _start_in_progress:
+            _start_in_progress = True
+            thread = threading.Thread(target=_start_worker, daemon=True)
+            thread.start()
+    if wait:
+        return _start_event.wait(timeout=timeout)
+    return False
+
+
+def _setup_worker():
+    global _setup_in_progress, _setup_error
+    try:
+        if not trigger_app_start(wait=True, timeout=15):
+            raise TimeoutError("Telegram app start timed out")
         _run_coroutine(setup_webhook(), timeout=15)
-        _setup_done = True
+        _setup_event.set()
+        _setup_error = None
+    except Exception as exc:
+        _setup_error = str(exc)
+        logger.error("Webhook setup failed: %s", exc, exc_info=True)
+    finally:
+        with _setup_lock:
+            _setup_in_progress = False
+
+
+def trigger_webhook_setup(force=False):
+    global _setup_in_progress
+    if _setup_event.is_set() and not force:
+        return "already_set"
+    with _setup_lock:
+        if _setup_in_progress:
+            return "running"
+        if _setup_event.is_set() and not force:
+            return "already_set"
+        if force:
+            _setup_event.clear()
+        _setup_in_progress = True
+        thread = threading.Thread(target=_setup_worker, daemon=True)
+        thread.start()
+        return "started"
 
 
 def _log_future_error(future):
@@ -193,7 +240,13 @@ def webhook():
     Webhook endpoint לקבלת עדכונים מטלגרם
     """
     try:
-        ensure_app_started()
+        if not _start_event.is_set():
+            trigger_app_start()
+            if not _start_event.wait(timeout=2):
+                return jsonify({
+                    "ok": False,
+                    "error": "Bot is starting, try again shortly"
+                }), 503
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, telegram_app.bot)
         logger.info("📩 Webhook update received: %s", update.update_id)
@@ -210,31 +263,18 @@ def set_webhook_route():
     """
     Route להגדרת webhook ידנית
     """
-    global _setup_done
-    try:
-        with _setup_lock:
-            _run_coroutine(setup_webhook(), timeout=15)
-            _setup_done = True
-        return jsonify({
-            "status": "success",
-            "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
-        })
-    except FutureTimeout:
-        logger.error("Webhook setup timed out")
-        return jsonify({
-            "status": "error",
-            "error": "Timeout while setting webhook"
-        }), 504
-    except Exception as e:
-        logger.error("Failed to set webhook: %s", e, exc_info=True)
-        return jsonify({
-            "status": "error",
-            "error": str(e)
-        }), 500
+    status = trigger_webhook_setup(force=True)
+    response = {
+        "status": status,
+        "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
+    }
+    if _setup_error:
+        response["last_error"] = _setup_error
+    http_status = 202 if status in ("started", "running") else 200
+    return jsonify(response), http_status
 
 
 async def _get_webhook_info():
-    await _start_telegram_app()
     return await asyncio.wait_for(
         telegram_app.bot.get_webhook_info(),
         timeout=5
@@ -247,14 +287,23 @@ def webhook_info():
     מידע על ה-webhook הנוכחי
     """
     try:
-        ensure_app_started()
-        info = _run_coroutine(_get_webhook_info(), timeout=10)
+        if not _start_event.is_set():
+            trigger_app_start()
+            response = {
+                "status": "starting",
+                "start_error": _start_error
+            }
+            if _setup_error:
+                response["last_setup_error"] = _setup_error
+            return jsonify(response), 202
+        info = _run_coroutine(_get_webhook_info(), timeout=6)
         return jsonify({
             "url": _mask_webhook_url(info.url) if info.url else info.url,
             "has_custom_certificate": info.has_custom_certificate,
             "pending_update_count": info.pending_update_count,
             "last_error_date": info.last_error_date,
-            "last_error_message": info.last_error_message
+            "last_error_message": info.last_error_message,
+            "setup_status": "done" if _setup_event.is_set() else "running" if _setup_in_progress else "idle"
         })
     except FutureTimeout:
         return jsonify({"error": "Timeout while contacting Telegram"}), 504
@@ -269,7 +318,11 @@ def main():
     logger.info("🤖 Starting Refiner Bot in WEBHOOK mode...")
     logger.info("📡 Webhook URL: %s", _mask_webhook_url(WEBHOOK_FULL_URL))
 
-    ensure_webhook()
+    status = trigger_webhook_setup(force=False)
+    if status == "started":
+        logger.info("⏳ Webhook setup started in background")
+    elif status == "running":
+        logger.info("⏳ Webhook setup already in progress")
     
     # הרצת Flask
     app.run(
@@ -279,19 +332,7 @@ def main():
     )
 
 
-def _auto_setup_webhook():
-    try:
-        ensure_webhook()
-    except Exception:
-        logger.exception("Auto webhook setup failed")
-
-
-def _schedule_webhook_setup():
-    thread = threading.Thread(target=_auto_setup_webhook, daemon=True)
-    thread.start()
-
-
 if __name__ == "__main__":
     main()
 else:
-    _schedule_webhook_setup()
+    trigger_webhook_setup(force=False)
