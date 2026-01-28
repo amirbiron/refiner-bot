@@ -7,6 +7,7 @@ import os
 import logging
 import asyncio
 import threading
+import time
 from concurrent.futures import TimeoutError as FutureTimeout
 from datetime import datetime
 from flask import Flask, request, jsonify
@@ -19,21 +20,8 @@ from telegram.ext import (
     ContextTypes,
     filters
 )
-from google import genai
-from google.genai import types
 
-# Import מקובץ הבוט הרגיל
-from bot import (
-    REFINER_PROMPT,
-    start_command,
-    help_command,
-    refine_text_with_gemini,
-    handle_forwarded_message,
-    publish_to_channel_callback,
-    error_handler
-)
-
-# הגדרת logging
+# הגדרת logging מוקדם
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
@@ -64,6 +52,19 @@ def _mask_webhook_url(url: str) -> str:
         return url.replace(TELEGRAM_BOT_TOKEN, "<TOKEN>")
     return url
 
+
+# Import מקובץ הבוט הרגיל - אחרי הגדרת logging
+# הimport מבוצע כאן כי bot.py מאתחל את Gemini client
+from bot import (
+    REFINER_PROMPT,
+    start_command,
+    help_command,
+    refine_text_with_gemini,
+    handle_forwarded_message,
+    publish_to_channel_callback,
+    error_handler
+)
+
 # יצירת Flask app
 app = Flask(__name__)
 
@@ -75,31 +76,39 @@ _loop = None
 _loop_thread = None
 _loop_ready = threading.Event()
 _start_lock = threading.Lock()
-_setup_lock = threading.Lock()
+_setup_lock = threading.RLock()  # RLock allows same thread to acquire multiple times
 _setup_done = False
+_setup_in_progress = False  # Flag to track if setup is running
 
 
 def _loop_runner():
+    """רץ ב-thread נפרד ומריץ את ה-event loop"""
     asyncio.set_event_loop(_loop)
     _loop_ready.set()
     _loop.run_forever()
 
 
 def _ensure_loop():
+    """מוודא שיש event loop פעיל"""
     global _loop, _loop_thread
-    if _loop_thread is None:
+    if _loop_thread is None or not _loop_thread.is_alive():
         _loop = asyncio.new_event_loop()
         _loop_thread = threading.Thread(target=_loop_runner, daemon=True)
         _loop_thread.start()
-        _loop_ready.wait()
+        # Wait with timeout to avoid hanging
+        if not _loop_ready.wait(timeout=10):
+            logger.error("Event loop failed to start within timeout")
+            raise RuntimeError("Event loop initialization timeout")
 
 
 def _submit_coroutine(coro):
+    """מגיש coroutine להרצה ב-event loop"""
     _ensure_loop()
     return asyncio.run_coroutine_threadsafe(coro, _loop)
 
 
 def _run_coroutine(coro, timeout=None):
+    """מריץ coroutine וממתין לתוצאה"""
     future = _submit_coroutine(coro)
     return future.result(timeout=timeout)
 
@@ -135,32 +144,93 @@ async def setup_webhook():
     הגדרת webhook ב-Telegram
     """
     await _start_telegram_app()
+    
+    # First, delete any existing webhook
+    try:
+        await asyncio.wait_for(
+            telegram_app.bot.delete_webhook(drop_pending_updates=False),
+            timeout=15
+        )
+        logger.info("🔄 Deleted existing webhook")
+    except asyncio.TimeoutError:
+        logger.warning("Timeout deleting existing webhook, continuing...")
+    except Exception as e:
+        logger.warning(f"Could not delete existing webhook: {e}")
+    
+    # Set the new webhook
     await asyncio.wait_for(
         telegram_app.bot.set_webhook(url=WEBHOOK_FULL_URL),
-        timeout=10
+        timeout=20
     )
     logger.info("✅ Webhook set to: %s", _mask_webhook_url(WEBHOOK_FULL_URL))
 
 
 def ensure_app_started():
+    """מוודא שה-Telegram app מאותחל ורץ"""
     if _telegram_started:
-        return
-    with _start_lock:
+        return True
+    
+    # Try to acquire lock with timeout to avoid deadlock
+    acquired = _start_lock.acquire(timeout=30)
+    if not acquired:
+        logger.warning("Could not acquire start lock - another thread is initializing")
+        return _telegram_started
+    
+    try:
         if _telegram_started:
-            return
-        _run_coroutine(_start_telegram_app(), timeout=15)
+            return True
+        _run_coroutine(_start_telegram_app(), timeout=30)
+        return True
+    except Exception as e:
+        logger.error(f"Failed to start Telegram app: {e}")
+        return False
+    finally:
+        _start_lock.release()
 
 
 def ensure_webhook():
-    global _setup_done
+    """מוודא שה-webhook מוגדר - thread-safe"""
+    global _setup_done, _setup_in_progress
+    
     if _setup_done:
-        return
-    with _setup_lock:
+        return True
+    
+    # Try to acquire lock with timeout
+    acquired = _setup_lock.acquire(timeout=5)
+    if not acquired:
+        logger.info("Webhook setup already in progress by another thread")
+        # Wait for the other thread to finish
+        for _ in range(30):
+            time.sleep(1)
+            if _setup_done:
+                return True
+        return False
+    
+    try:
         if _setup_done:
-            return
-        ensure_app_started()
-        _run_coroutine(setup_webhook(), timeout=15)
+            return True
+        
+        _setup_in_progress = True
+        logger.info("Starting webhook setup...")
+        
+        if not ensure_app_started():
+            logger.error("Failed to start Telegram app")
+            return False
+        
+        _run_coroutine(setup_webhook(), timeout=30)
         _setup_done = True
+        logger.info("✅ Webhook setup completed successfully")
+        return True
+        
+    except FutureTimeout:
+        logger.error("Webhook setup timed out")
+        return False
+    except Exception as e:
+        logger.error(f"Webhook setup failed: {e}", exc_info=True)
+        return False
+    finally:
+        _setup_in_progress = False
+        _setup_lock.release()
 
 
 def _log_future_error(future):
@@ -211,14 +281,43 @@ def set_webhook_route():
     Route להגדרת webhook ידנית
     """
     global _setup_done
-    try:
-        with _setup_lock:
-            _run_coroutine(setup_webhook(), timeout=15)
-            _setup_done = True
+    
+    # If already done, just return success
+    if _setup_done:
         return jsonify({
             "status": "success",
+            "message": "Webhook already configured",
             "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
         })
+    
+    # If setup is in progress, wait for it
+    if _setup_in_progress:
+        logger.info("Webhook setup in progress, waiting...")
+        for _ in range(60):  # Wait up to 60 seconds
+            time.sleep(1)
+            if _setup_done:
+                return jsonify({
+                    "status": "success",
+                    "message": "Webhook configured by background thread",
+                    "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
+                })
+        return jsonify({
+            "status": "error",
+            "error": "Webhook setup still in progress, try again later"
+        }), 503
+    
+    try:
+        success = ensure_webhook()
+        if success:
+            return jsonify({
+                "status": "success",
+                "webhook_url": _mask_webhook_url(WEBHOOK_FULL_URL)
+            })
+        else:
+            return jsonify({
+                "status": "error",
+                "error": "Webhook setup failed"
+            }), 500
     except FutureTimeout:
         logger.error("Webhook setup timed out")
         return jsonify({
@@ -280,18 +379,49 @@ def main():
 
 
 def _auto_setup_webhook():
-    try:
-        ensure_webhook()
-    except Exception:
-        logger.exception("Auto webhook setup failed")
+    """
+    Setup webhook automatically with retry logic
+    """
+    max_retries = 3
+    retry_delay = 5
+    
+    for attempt in range(max_retries):
+        try:
+            logger.info(f"Auto webhook setup attempt {attempt + 1}/{max_retries}")
+            
+            # Small delay to let the app fully initialize
+            if attempt == 0:
+                time.sleep(2)
+            
+            success = ensure_webhook()
+            if success:
+                logger.info("✅ Auto webhook setup successful")
+                return
+            else:
+                logger.warning(f"Webhook setup returned False, attempt {attempt + 1}")
+                
+        except Exception as e:
+            logger.error(f"Auto webhook setup attempt {attempt + 1} failed: {e}")
+        
+        if attempt < max_retries - 1:
+            logger.info(f"Retrying in {retry_delay} seconds...")
+            time.sleep(retry_delay)
+            retry_delay *= 2  # Exponential backoff
+    
+    logger.error("❌ All auto webhook setup attempts failed")
 
 
 def _schedule_webhook_setup():
-    thread = threading.Thread(target=_auto_setup_webhook, daemon=True)
+    """
+    Schedule webhook setup in a background thread
+    """
+    thread = threading.Thread(target=_auto_setup_webhook, daemon=True, name="WebhookSetup")
     thread.start()
+    logger.info("📡 Webhook setup scheduled in background thread")
 
 
 if __name__ == "__main__":
     main()
 else:
+    # Only schedule webhook setup when imported by gunicorn
     _schedule_webhook_setup()
