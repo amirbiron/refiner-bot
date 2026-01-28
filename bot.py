@@ -30,13 +30,41 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # לדוגמה: @my_channel
 
-# אתחול Gemini client
-try:
-    gemini_client = genai.Client(api_key=GEMINI_API_KEY)
-    logger.info("✅ Gemini client initialized successfully")
-except Exception as e:
-    logger.error(f"❌ Failed to initialize Gemini: {e}")
-    raise
+# Lazy initialization של Gemini client - מאותחל רק בשימוש הראשון
+_gemini_client = None
+_gemini_client_lock = None
+
+
+def _get_gemini_client():
+    """
+    מחזיר את ה-Gemini client, מאתחל אותו אם צריך (lazy initialization)
+    זה מונע חסימה בזמן import של המודול
+    """
+    global _gemini_client, _gemini_client_lock
+    
+    # Initialize lock if needed (thread-safe)
+    if _gemini_client_lock is None:
+        import threading
+        _gemini_client_lock = threading.Lock()
+    
+    if _gemini_client is None:
+        with _gemini_client_lock:
+            if _gemini_client is None:
+                try:
+                    logger.info("🔄 Initializing Gemini client...")
+                    _gemini_client = genai.Client(api_key=GEMINI_API_KEY)
+                    logger.info("✅ Gemini client initialized successfully")
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize Gemini: {e}")
+                    raise
+    
+    return _gemini_client
+
+
+# Alias for backwards compatibility
+def get_gemini_client():
+    """Public function to get the Gemini client"""
+    return _get_gemini_client()
 
 # הפרומפט המושלם לשכתוב
 REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערוצי טלגרם בעברית.
@@ -114,8 +142,11 @@ async def refine_text_with_gemini(original_text: str) -> str:
     try:
         logger.info(f"📝 Starting refinement for text of length: {len(original_text)}")
         
+        # Get the Gemini client (lazy initialization)
+        client = _get_gemini_client()
+        
         # קריאה ל-Gemini API
-        response = gemini_client.models.generate_content(
+        response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=REFINER_PROMPT.format(original_text=original_text),
             config=types.GenerateContentConfig(

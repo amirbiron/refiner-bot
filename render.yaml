@@ -5,7 +5,7 @@ services:
     region: oregon
     plan: free
     buildCommand: pip install --upgrade pip && pip install -r requirements.txt
-    startCommand: gunicorn bot_webhook:app --bind 0.0.0.0:$PORT
+    startCommand: gunicorn bot_webhook:app --bind 0.0.0.0:$PORT --timeout 120 --workers 1 --preload
     healthCheckPath: /
     envVars:
       - key: TELEGRAM_BOT_TOKEN
