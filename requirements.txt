@@ -6,7 +6,6 @@ google-genai==1.60.0
 
 # MongoDB Driver (optional - for future features)
 pymongo==4.16.0
-dnspython==2.6.1
 
 # Web framework (for webhook mode)
 Flask==3.1.0
