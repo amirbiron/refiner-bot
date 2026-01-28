@@ -194,6 +194,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     # הודעת המתנה
     processing_msg = await message.reply_text("⏳ משכתב את ההודעה עם AI...")
+    processing_msg_deleted = False
     
     try:
         # שכתוב הטקסט
@@ -211,7 +212,11 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['refined_at'] = datetime.now()
         
         # מחיקת הודעת ההמתנה
-        await processing_msg.delete()
+        try:
+            await processing_msg.delete()
+            processing_msg_deleted = True
+        except Exception as del_err:
+            logger.warning(f"Could not delete processing message: {del_err}")
         
         # שליחת התוצאה
         await message.reply_text(
@@ -223,11 +228,26 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         logger.info(f"✅ Message refined successfully for user {message.from_user.id}")
         
     except Exception as e:
-        await processing_msg.edit_text(
+        logger.error(f"Error in handle_forwarded_message: {e}")
+        
+        error_message = (
             f"❌ שגיאה בשכתוב ההודעה:\n{str(e)}\n\n"
             "נסה שוב מאוחר יותר."
         )
-        logger.error(f"Error in handle_forwarded_message: {e}")
+        
+        # נסה לערוך את הודעת ההמתנה, אם לא נמחקה
+        if not processing_msg_deleted:
+            try:
+                await processing_msg.edit_text(error_message)
+                return
+            except Exception as edit_err:
+                logger.warning(f"Could not edit processing message: {edit_err}")
+        
+        # אם לא הצלחנו לערוך, שלח הודעה חדשה
+        try:
+            await message.reply_text(error_message)
+        except Exception as reply_err:
+            logger.error(f"Could not send error reply: {reply_err}")
 
 
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
