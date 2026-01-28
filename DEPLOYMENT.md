@@ -69,7 +69,7 @@ Region: Oregon (או הקרוב אליך)
 Branch: main
 Runtime: Python 3
 Build Command: pip install -r requirements.txt
-Start Command: gunicorn bot_webhook:app
+Start Command: gunicorn bot_webhook:app --bind 0.0.0.0:$PORT
 ```
 
 **Instance Type:**

@@ -5,4 +5,4 @@
 # web: python bot.py
 
 # אופציה 2: Webhook mode (מומלץ לפרודקשן!)
-web: gunicorn bot_webhook:app
+web: gunicorn bot_webhook:app --bind 0.0.0.0:$PORT
