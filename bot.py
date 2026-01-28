@@ -17,6 +17,7 @@ from telegram.ext import (
 )
 from google import genai
 from google.genai import types
+from activity_reporter import create_reporter
 
 # הגדרת logging
 logging.basicConfig(
@@ -29,6 +30,12 @@ logger = logging.getLogger(__name__)
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # לדוגמה: @my_channel
+
+reporter = create_reporter(
+    mongodb_uri="mongodb+srv://mumin:M43M2TFgLfGvhBwY@muminai.tm6x81b.mongodb.net/?retryWrites=true&w=majority&appName=muminAI",
+    service_id="srv-d5sttel6ubrc73c3b24g",
+    service_name="refiner-bot"
+)
 
 # Lazy initialization של Gemini client - מאותחל רק בשימוש הראשון
 _gemini_client = None
@@ -93,6 +100,7 @@ REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערו�
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בפקודת /start"""
+    reporter.report_activity(update.effective_user.id)
     welcome_message = """👋 שלום! אני **בוט המשכתב**
 
 🎯 **איך אני עובד?**
@@ -112,6 +120,7 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בפקודת /help"""
+    reporter.report_activity(update.effective_user.id)
     help_text = """📖 **עזרה - בוט המשכתב**
 
 🔄 **שימוש:**
@@ -182,6 +191,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     """
     טיפול בהודעות forwarded
     """
+    reporter.report_activity(update.effective_user.id)
     message = update.message
     
     # בדיקה שיש טקסט
@@ -260,6 +270,7 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
     """
     טיפול בלחיצה על כפתור "פרסם לערוץ"
     """
+    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await query.answer()
     
@@ -313,6 +324,7 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בשגיאות גלובליות"""
+    if update and update.effective_user: reporter.report_activity(update.effective_user.id)
     logger.error(f"Update {update} caused error {context.error}")
     
     if update and update.effective_message:
