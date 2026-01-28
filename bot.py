@@ -146,6 +146,7 @@ async def refine_text_with_gemini(original_text: str) -> str:
         client = _get_gemini_client()
         
         # קריאה ל-Gemini API
+        # max_output_tokens גבוה יותר לתמיכה בטקסטים ארוכים
         response = client.models.generate_content(
             model='gemini-2.5-flash',
             contents=REFINER_PROMPT.format(original_text=original_text),
@@ -153,11 +154,21 @@ async def refine_text_with_gemini(original_text: str) -> str:
                 temperature=0.7,  # קצת יצירתיות אבל לא יותר מדי
                 top_p=0.9,
                 top_k=40,
-                max_output_tokens=2048,
+                max_output_tokens=8192,  # הגדלה משמעותית לתמיכה בטקסטים ארוכים
             )
         )
         
         refined_text = response.text.strip()
+        
+        # בדיקה אם התשובה נחתכה
+        if hasattr(response, 'candidates') and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, 'finish_reason'):
+                finish_reason = str(candidate.finish_reason)
+                if 'MAX_TOKENS' in finish_reason or 'LENGTH' in finish_reason:
+                    logger.warning(f"⚠️ Response was truncated due to: {finish_reason}")
+                    refined_text += "\n\n⚠️ [הטקסט נחתך - המקור ארוך מדי]"
+        
         logger.info(f"✅ Refinement successful, output length: {len(refined_text)}")
         
         return refined_text
