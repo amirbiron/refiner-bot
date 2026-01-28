@@ -194,7 +194,6 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     # הודעת המתנה
     processing_msg = await message.reply_text("⏳ משכתב את ההודעה עם AI...")
-    processing_msg_deleted = False
     
     try:
         # שכתוב הטקסט
@@ -211,19 +210,29 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         context.user_data['last_refined_text'] = refined_text
         context.user_data['refined_at'] = datetime.now()
         
-        # מחיקת הודעת ההמתנה
+        # שליחת התוצאה - קודם שולחים, רק אחרי הצלחה מוחקים!
+        result_text = f"✨ גרסה משוכתבת:\n\n{refined_text}"
+        
+        # נסה לשלוח עם Markdown, אם נכשל - שלח בלי
+        try:
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup,
+                parse_mode="Markdown"
+            )
+        except Exception as md_err:
+            logger.warning(f"Markdown failed, sending without parse_mode: {md_err}")
+            # שלח בלי Markdown אם יש בעיה עם התווים
+            await message.reply_text(
+                result_text,
+                reply_markup=reply_markup
+            )
+        
+        # מחיקת הודעת ההמתנה - רק אחרי שהתשובה נשלחה בהצלחה!
         try:
             await processing_msg.delete()
-            processing_msg_deleted = True
         except Exception as del_err:
             logger.warning(f"Could not delete processing message: {del_err}")
-        
-        # שליחת התוצאה
-        await message.reply_text(
-            f"✨ **גרסה משוכתבת:**\n\n{refined_text}",
-            reply_markup=reply_markup,
-            parse_mode="Markdown"
-        )
         
         logger.info(f"✅ Message refined successfully for user {message.from_user.id}")
         
@@ -235,19 +244,16 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
             "נסה שוב מאוחר יותר."
         )
         
-        # נסה לערוך את הודעת ההמתנה, אם לא נמחקה
-        if not processing_msg_deleted:
-            try:
-                await processing_msg.edit_text(error_message)
-                return
-            except Exception as edit_err:
-                logger.warning(f"Could not edit processing message: {edit_err}")
-        
-        # אם לא הצלחנו לערוך, שלח הודעה חדשה
+        # נסה לערוך את הודעת ההמתנה (עדיין קיימת כי לא מחקנו)
         try:
-            await message.reply_text(error_message)
-        except Exception as reply_err:
-            logger.error(f"Could not send error reply: {reply_err}")
+            await processing_msg.edit_text(error_message)
+        except Exception as edit_err:
+            logger.warning(f"Could not edit processing message: {edit_err}")
+            # אם לא הצלחנו לערוך, שלח הודעה חדשה
+            try:
+                await message.reply_text(error_message)
+            except Exception as reply_err:
+                logger.error(f"Could not send error reply: {reply_err}")
 
 
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -275,12 +281,19 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         return
     
     try:
-        # פרסום לערוץ
-        await context.bot.send_message(
-            chat_id=CHANNEL_USERNAME,
-            text=refined_text,
-            parse_mode="Markdown"
-        )
+        # פרסום לערוץ - נסה עם Markdown, אם נכשל - בלי
+        try:
+            await context.bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=refined_text,
+                parse_mode="Markdown"
+            )
+        except Exception as md_err:
+            logger.warning(f"Markdown failed for channel, sending without: {md_err}")
+            await context.bot.send_message(
+                chat_id=CHANNEL_USERNAME,
+                text=refined_text
+            )
         
         await query.edit_message_text(
             f"✅ פורסם בהצלחה לערוץ {CHANNEL_USERNAME}!\n\n"
