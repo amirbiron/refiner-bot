@@ -96,6 +96,25 @@ def markdown_to_html(text: str) -> str:
     return text
 
 
+def build_publish_keyboard(is_edit_mode: bool = False) -> InlineKeyboardMarkup:
+    """
+    מקלדת אינליין עבור תצוגת פוסט לפני פרסום.
+    - מצב רגיל: מאפשר עריכה לפני פרסום + פרסום
+    - מצב עריכה: מאפשר לפרסם בלי עריכה או לבטל את מצב העריכה
+    """
+    if is_edit_mode:
+        keyboard = [
+            [InlineKeyboardButton("📢 פרסם בלי עריכה", callback_data="publish")],
+            [InlineKeyboardButton("❌ בטל עריכה", callback_data="cancel_manual_edit")],
+        ]
+    else:
+        keyboard = [[
+            InlineKeyboardButton("✏️ ערוך לפני פרסום", callback_data="edit_before_publish"),
+            InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish"),
+        ]]
+    return InlineKeyboardMarkup(keyboard)
+
+
 # הפרומפט המושלם לשכתוב
 REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערוצי טלגרם בעברית.
 
@@ -240,6 +259,11 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     if chat.type == "channel":
         logger.debug(f"Ignoring forwarded message from channel chat_id={chat.id}")
         return
+
+    # אם המשתמש היה במצב עריכה ושלח forward חדש - נבטל מצב עריכה ונמשיך כרגיל
+    if context.user_data.get("awaiting_manual_edit"):
+        context.user_data["awaiting_manual_edit"] = False
+        context.user_data.pop("last_refined_text_before_edit", None)
     
     reporter.report_activity(user.id)
     
@@ -258,12 +282,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # שכתוב הטקסט
         original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
-        
-        # יצירת כפתור פרסום
-        keyboard = [
-            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data=f"publish")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = build_publish_keyboard(is_edit_mode=False)
         
         # שמירת הטקסט המשוכתב ב-context
         context.user_data['last_refined_text'] = refined_text
@@ -332,6 +351,30 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     
     logger.info(f"📨 Received regular text message from user {user.id}")
     reporter.report_activity(user.id)
+
+    # אם אנחנו במצב "עריכה לפני פרסום" - ההודעה הזו נחשבת כטקסט הסופי לפרסום
+    if context.user_data.get("awaiting_manual_edit"):
+        edited_text = (message.text or "").strip()
+        if not edited_text:
+            await message.reply_text("⚠️ לא התקבל טקסט לעריכה. נסה לשלוח שוב.")
+            return
+
+        context.user_data["last_refined_text"] = edited_text
+        context.user_data["edited_at"] = datetime.now()
+        context.user_data["awaiting_manual_edit"] = False
+        context.user_data.pop("last_refined_text_before_edit", None)
+
+        reply_markup = build_publish_keyboard(is_edit_mode=False)
+        try:
+            html_text = f"✅ עודכן הטקסט לפרסום:\n\n{markdown_to_html(edited_text)}"
+            await message.reply_text(html_text, reply_markup=reply_markup, parse_mode="HTML")
+        except Exception as html_err:
+            logger.debug(f"HTML parsing failed for edited text, sending plain: {html_err}")
+            await message.reply_text(
+                f"✅ עודכן הטקסט לפרסום:\n\n{edited_text}",
+                reply_markup=reply_markup
+            )
+        return
     
     # בדיקה שיש טקסט
     if not message.text:
@@ -358,12 +401,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         # שכתוב הטקסט
         original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
-        
-        # יצירת כפתור פרסום
-        keyboard = [
-            [InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish")]
-        ]
-        reply_markup = InlineKeyboardMarkup(keyboard)
+        reply_markup = build_publish_keyboard(is_edit_mode=False)
         
         # שמירת הטקסט המשוכתב ב-context
         context.user_data['last_refined_text'] = refined_text
@@ -419,6 +457,11 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
     reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await query.answer()
+
+    # בכל פרסום נוודא שאנחנו לא נשארים "תקועים" במצב עריכה
+    if context.user_data.get("awaiting_manual_edit"):
+        context.user_data["awaiting_manual_edit"] = False
+        context.user_data.pop("last_refined_text_before_edit", None)
     
     # בדיקה שיש ערוץ מוגדר
     if not CHANNEL_USERNAME:
@@ -470,6 +513,62 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
         logger.error(f"Error publishing to channel: {e}")
 
 
+async def edit_before_publish_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    כניסה למצב "עריכה לפני פרסום" - המשתמש ישלח הודעת טקסט חדשה שתשמש כגרסה הסופית לפרסום.
+    """
+    reporter.report_activity(update.effective_user.id)
+    query = update.callback_query
+    await query.answer()
+
+    refined_text = context.user_data.get("last_refined_text")
+    if not refined_text:
+        await query.edit_message_text(
+            "⚠️ לא נמצא טקסט לעריכה.\n"
+            "אנא שלח/forward הודעה כדי ליצור גרסה משוכתבת."
+        )
+        return
+
+    context.user_data["last_refined_text_before_edit"] = refined_text
+    context.user_data["awaiting_manual_edit"] = True
+    context.user_data["manual_edit_started_at"] = datetime.now()
+
+    # עדכון המקלדת על גבי הודעת התצוגה כדי להציע ביטול/פרסום בלי עריכה
+    try:
+        await query.edit_message_reply_markup(reply_markup=build_publish_keyboard(is_edit_mode=True))
+    except Exception as e:
+        logger.debug(f"Could not edit reply markup for edit mode: {e}")
+
+    # הודעה נפרדת שמסבירה מה לעשות (לא מוחקת את התצוגה הקודמת)
+    await query.message.reply_text(
+        "✏️ מצב עריכה הופעל.\n\n"
+        "שלח עכשיו הודעת טקסט עם **הגרסה הסופית** שברצונך לפרסם לערוץ.\n"
+        "כדי לבטל את מצב העריכה, לחץ על \"❌ בטל עריכה\".",
+        parse_mode="Markdown"
+    )
+
+
+async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ביטול מצב עריכה והחזרה לגרסה לפני העריכה (אם קיימת)."""
+    reporter.report_activity(update.effective_user.id)
+    query = update.callback_query
+    await query.answer()
+
+    context.user_data["awaiting_manual_edit"] = False
+    before = context.user_data.pop("last_refined_text_before_edit", None)
+    if before:
+        context.user_data["last_refined_text"] = before
+
+    # חזרה למקלדת הרגילה על הודעת התצוגה
+    try:
+        await query.edit_message_reply_markup(reply_markup=build_publish_keyboard(is_edit_mode=False))
+    except Exception as e:
+        logger.debug(f"Could not restore reply markup after cancel: {e}")
+
+    # הודעת אישור קצרה
+    await query.message.reply_text("✅ מצב עריכה בוטל. אפשר לפרסם כרגיל.")
+
+
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בשגיאות גלובליות"""
     chat = update.effective_chat if update else None
@@ -515,6 +614,14 @@ def main():
     app.add_handler(MessageHandler(
         ~filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
         handle_regular_text_message
+    ))
+    app.add_handler(CallbackQueryHandler(
+        edit_before_publish_callback,
+        pattern="^edit_before_publish$"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        cancel_manual_edit_callback,
+        pattern="^cancel_manual_edit$"
     ))
     app.add_handler(CallbackQueryHandler(
         publish_to_channel_callback,
