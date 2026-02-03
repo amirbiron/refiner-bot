@@ -5,6 +5,7 @@
 
 import os
 import re
+import html
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -94,6 +95,11 @@ def markdown_to_html(text: str) -> str:
     text = re.sub(r'`(.+?)`', r'<code>\1</code>', text)
     
     return text
+
+
+def text_to_pre_html(text: str) -> str:
+    """Wrap text as a Telegram HTML <pre> code block (safe escaping)."""
+    return f"<pre>{html.escape(text)}</pre>"
 
 
 def build_publish_keyboard(is_edit_mode: bool = False) -> InlineKeyboardMarkup:
@@ -552,13 +558,9 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
         parse_mode="Markdown"
     )
 
-    # שליחת הטיוטה עצמה להעתקה (plain text)
-    # Telegram לא מאפשר “עורך” עם טקסט ממולא מראש, אז אנחנו שולחים הודעה שאפשר לעשות עליה Copy/Paste
-    try:
-        await query.message.reply_text(refined_text, disable_web_page_preview=True)
-    except TypeError:
-        # תאימות אם הגרסה של PTB לא תומכת בפרמטר
-        await query.message.reply_text(refined_text)
+    # שליחת הטיוטה עצמה להעתקה בתוך בלוק קוד
+    # כך copy-paste שומר על הסימונים כמו **bold** ולא “נבלע” ע״י טלגרם
+    await query.message.reply_text(text_to_pre_html(refined_text), parse_mode="HTML")
 
 
 async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -574,10 +576,7 @@ async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT
         )
         return
 
-    try:
-        await query.message.reply_text(refined_text, disable_web_page_preview=True)
-    except TypeError:
-        await query.message.reply_text(refined_text)
+    await query.message.reply_text(text_to_pre_html(refined_text), parse_mode="HTML")
 
 
 async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
