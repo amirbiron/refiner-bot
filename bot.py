@@ -106,12 +106,16 @@ def build_publish_keyboard(is_edit_mode: bool = False) -> InlineKeyboardMarkup:
         keyboard = [
             [InlineKeyboardButton("📢 פרסם בלי עריכה", callback_data="publish")],
             [InlineKeyboardButton("❌ בטל עריכה", callback_data="cancel_manual_edit")],
+            [InlineKeyboardButton("📋 שלח טיוטה להעתקה", callback_data="send_draft_copy")],
         ]
     else:
-        keyboard = [[
-            InlineKeyboardButton("✏️ ערוך לפני פרסום", callback_data="edit_before_publish"),
-            InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish"),
-        ]]
+        keyboard = [
+            [
+                InlineKeyboardButton("✏️ ערוך לפני פרסום", callback_data="edit_before_publish"),
+                InlineKeyboardButton("📢 פרסם לערוץ", callback_data="publish"),
+            ],
+            [InlineKeyboardButton("📋 שלח טיוטה להעתקה", callback_data="send_draft_copy")],
+        ]
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -542,10 +546,38 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
     # הודעה נפרדת שמסבירה מה לעשות (לא מוחקת את התצוגה הקודמת)
     await query.message.reply_text(
         "✏️ מצב עריכה הופעל.\n\n"
-        "שלח עכשיו הודעת טקסט עם **הגרסה הסופית** שברצונך לפרסם לערוץ.\n"
+        "שלחתי לך עכשיו את הטיוטה להעתקה.\n"
+        "העתק/י, ערוך/י בהודעה חדשה, ושלח/י לבוט את **הגרסה הסופית** לפרסום.\n"
         "כדי לבטל את מצב העריכה, לחץ על \"❌ בטל עריכה\".",
         parse_mode="Markdown"
     )
+
+    # שליחת הטיוטה עצמה להעתקה (plain text)
+    # Telegram לא מאפשר “עורך” עם טקסט ממולא מראש, אז אנחנו שולחים הודעה שאפשר לעשות עליה Copy/Paste
+    try:
+        await query.message.reply_text(refined_text, disable_web_page_preview=True)
+    except TypeError:
+        # תאימות אם הגרסה של PTB לא תומכת בפרמטר
+        await query.message.reply_text(refined_text)
+
+
+async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """שליחת הטיוטה הנוכחית להעתקה (כדי להקל על עריכה ידנית)."""
+    reporter.report_activity(update.effective_user.id)
+    query = update.callback_query
+    await query.answer()
+
+    refined_text = context.user_data.get("last_refined_text")
+    if not refined_text:
+        await query.message.reply_text(
+            "⚠️ לא נמצאה טיוטה לשליחה. אנא שלח/forward הודעה כדי ליצור גרסה משוכתבת."
+        )
+        return
+
+    try:
+        await query.message.reply_text(refined_text, disable_web_page_preview=True)
+    except TypeError:
+        await query.message.reply_text(refined_text)
 
 
 async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -618,6 +650,10 @@ def main():
     app.add_handler(CallbackQueryHandler(
         edit_before_publish_callback,
         pattern="^edit_before_publish$"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        send_draft_copy_callback,
+        pattern="^send_draft_copy$"
     ))
     app.add_handler(CallbackQueryHandler(
         cancel_manual_edit_callback,
