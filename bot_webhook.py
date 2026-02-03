@@ -63,6 +63,9 @@ from bot import (
     handle_forwarded_message,
     handle_regular_text_message,
     publish_to_channel_callback,
+    edit_before_publish_callback,
+    cancel_manual_edit_callback,
+    send_draft_copy_callback,
     error_handler
 )
 
@@ -126,6 +129,18 @@ def _build_telegram_app():
     app.add_handler(MessageHandler(
         (~filters.FORWARDED) & filters.TEXT & (~filters.COMMAND),
         handle_regular_text_message
+    ))
+    app.add_handler(CallbackQueryHandler(
+        edit_before_publish_callback,
+        pattern="^edit_before_publish$"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        send_draft_copy_callback,
+        pattern="^send_draft_copy$"
+    ))
+    app.add_handler(CallbackQueryHandler(
+        cancel_manual_edit_callback,
+        pattern="^cancel_manual_edit$"
     ))
     app.add_handler(CallbackQueryHandler(
         publish_to_channel_callback,
