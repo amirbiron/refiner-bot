@@ -123,11 +123,22 @@ REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערו�
 
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בפקודת /start"""
-    reporter.report_activity(update.effective_user.id)
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat is None or message is None or user is None:
+        logger.debug("Ignoring /start update without user/message (likely channel_post)")
+        return
+    if chat.type == "channel":
+        logger.debug(f"Ignoring /start in channel chat_id={chat.id}")
+        return
+    
+    reporter.report_activity(user.id)
     welcome_message = """👋 שלום! אני **בוט יוצר הפוסטים**
     בא ניצור משהו יפה."""
     
-    await update.message.reply_text(
+    await message.reply_text(
         welcome_message,
         parse_mode="Markdown"
     )
@@ -135,7 +146,18 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בפקודת /help"""
-    reporter.report_activity(update.effective_user.id)
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    if chat is None or message is None or user is None:
+        logger.debug("Ignoring /help update without user/message (likely channel_post)")
+        return
+    if chat.type == "channel":
+        logger.debug(f"Ignoring /help in channel chat_id={chat.id}")
+        return
+    
+    reporter.report_activity(user.id)
     help_text = """📖 **עזרה - בוט המשכתב**
 
 🔄 **שימוש:**
@@ -154,7 +176,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 שאלות? צור קשר עם המפתח!"""
     
     channel = CHANNEL_USERNAME or "לא הוגדר (עדכן ב-.env)"
-    await update.message.reply_text(
+    await message.reply_text(
         help_text.format(channel=channel),
         parse_mode="Markdown"
     )
@@ -207,8 +229,19 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     """
     טיפול בהודעות forwarded
     """
-    reporter.report_activity(update.effective_user.id)
-    message = update.message
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # Channel posts don't have an effective user and shouldn't be processed
+    if chat is None or message is None or user is None:
+        logger.debug("Ignoring forwarded update without user/message (likely channel_post)")
+        return
+    if chat.type == "channel":
+        logger.debug(f"Ignoring forwarded message from channel chat_id={chat.id}")
+        return
+    
+    reporter.report_activity(user.id)
     
     # בדיקה שיש טקסט
     if not message.text:
@@ -285,9 +318,20 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
     """
     טיפול בהודעות טקסט רגילות (לא forwarded) - שכתוב עם AI
     """
-    logger.info(f"📨 Received regular text message from user {update.effective_user.id}")
-    reporter.report_activity(update.effective_user.id)
-    message = update.message
+    message = update.effective_message
+    chat = update.effective_chat
+    user = update.effective_user
+    
+    # Channel posts don't have an effective user and shouldn't be processed
+    if chat is None or message is None or user is None:
+        logger.debug("Ignoring regular text update without user/message (likely channel_post)")
+        return
+    if chat.type == "channel":
+        logger.debug(f"Ignoring regular text message from channel chat_id={chat.id}")
+        return
+    
+    logger.info(f"📨 Received regular text message from user {user.id}")
+    reporter.report_activity(user.id)
     
     # בדיקה שיש טקסט
     if not message.text:
@@ -428,10 +472,18 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """טיפול בשגיאות גלובליות"""
-    if update and update.effective_user: reporter.report_activity(update.effective_user.id)
+    chat = update.effective_chat if update else None
+    user = update.effective_user if update else None
+    
+    # Channel posts often don't have an effective_user and shouldn't get bot replies
+    if user:
+        reporter.report_activity(user.id)
     logger.error(f"Update {update} caused error {context.error}")
     
     if update and update.effective_message:
+        if chat and chat.type == "channel":
+            # Avoid spamming channels with generic "unexpected error" replies
+            return
         await update.effective_message.reply_text(
             "❌ אירעה שגיאה לא צפויה.\n"
             "אנא נסה שוב או צור קשר עם התמיכה."
