@@ -74,11 +74,15 @@ app = Flask(__name__)
 
 # יצירת Telegram Application
 telegram_app = None
+_telegram_initialized = False
 _telegram_started = False
+_init_future = None   # concurrent.futures.Future for Application.initialize()
+_start_future = None  # concurrent.futures.Future for Application.start()
 
 _loop = None
 _loop_thread = None
 _loop_ready = threading.Event()
+_init_lock = threading.Lock()
 _start_lock = threading.Lock()
 _setup_lock = threading.RLock()  # RLock allows same thread to acquire multiple times
 _setup_done = False
@@ -96,6 +100,8 @@ def _ensure_loop():
     """מוודא שיש event loop פעיל"""
     global _loop, _loop_thread
     if _loop_thread is None or not _loop_thread.is_alive():
+        # If we are recreating the loop, reset readiness flag
+        _loop_ready.clear()
         _loop = asyncio.new_event_loop()
         _loop_thread = threading.Thread(target=_loop_runner, daemon=True)
         _loop_thread.start()
@@ -114,7 +120,15 @@ def _submit_coroutine(coro):
 def _run_coroutine(coro, timeout=None):
     """מריץ coroutine וממתין לתוצאה"""
     future = _submit_coroutine(coro)
-    return future.result(timeout=timeout)
+    try:
+        return future.result(timeout=timeout)
+    except FutureTimeout:
+        # Don't leave callers hanging; best-effort cancel
+        try:
+            future.cancel()
+        except Exception:
+            pass
+        raise
 
 
 def _build_telegram_app():
@@ -150,12 +164,24 @@ def _build_telegram_app():
     return app
 
 
-async def _start_telegram_app():
-    global telegram_app, _telegram_started
+async def _initialize_telegram_app():
+    """
+    Initialize PTB Application once.
+    Note: For webhook mode, processing updates only requires initialize().
+    """
+    global telegram_app, _telegram_initialized
     if telegram_app is None:
         telegram_app = _build_telegram_app()
-    if not _telegram_started:
+    if not _telegram_initialized:
         await telegram_app.initialize()
+        _telegram_initialized = True
+
+
+async def _start_telegram_app():
+    """Start the PTB Application (optional for webhook processing)."""
+    global _telegram_started
+    await _initialize_telegram_app()
+    if not _telegram_started:
         await telegram_app.start()
         _telegram_started = True
 
@@ -164,7 +190,8 @@ async def setup_webhook():
     """
     הגדרת webhook ב-Telegram
     """
-    await _start_telegram_app()
+    # No need to fully start the app just to set a webhook
+    await _initialize_telegram_app()
     
     # First, delete any existing webhook
     try:
@@ -188,10 +215,16 @@ async def setup_webhook():
 
 def ensure_app_started():
     """מוודא שה-Telegram app מאותחל ורץ"""
+    global _start_future, _telegram_started
+
     if _telegram_started:
         return True
-    
-    # Try to acquire lock with timeout to avoid deadlock
+
+    # Ensure initialize() completed first (separate lock)
+    if not ensure_app_initialized():
+        return False
+
+    # Try to acquire start lock with timeout to avoid deadlock
     acquired = _start_lock.acquire(timeout=30)
     if not acquired:
         logger.warning("Could not acquire start lock - another thread is initializing")
@@ -200,13 +233,62 @@ def ensure_app_started():
     try:
         if _telegram_started:
             return True
-        _run_coroutine(_start_telegram_app(), timeout=30)
+        # Single-flight start
+        if _start_future is None or _start_future.done():
+            _start_future = _submit_coroutine(_start_telegram_app())
+        _start_future.result(timeout=45)
         return True
+    except FutureTimeout:
+        logger.error("Failed to start Telegram app: Timed out")
+        return False
     except Exception as e:
         logger.error(f"Failed to start Telegram app: {e}")
+        # Allow future retries
+        try:
+            if _start_future is not None and _start_future.done():
+                _start_future = None
+        except Exception:
+            pass
         return False
     finally:
         _start_lock.release()
+
+
+def ensure_app_initialized():
+    """מוודא שה-Telegram app מאותחל (Application.initialize) לפני process_update."""
+    global _init_future, _telegram_initialized
+
+    if _telegram_initialized:
+        return True
+
+    acquired = _init_lock.acquire(timeout=30)
+    if not acquired:
+        logger.warning("Could not acquire init lock - another thread is initializing")
+        return _telegram_initialized
+
+    try:
+        if _telegram_initialized:
+            return True
+
+        # Single-flight initialization
+        if _init_future is None or _init_future.done():
+            _init_future = _submit_coroutine(_initialize_telegram_app())
+
+        _init_future.result(timeout=45)
+        return _telegram_initialized
+    except FutureTimeout:
+        logger.error("Failed to initialize Telegram app: Timed out")
+        return False
+    except Exception as e:
+        logger.error(f"Failed to initialize Telegram app: {e}")
+        try:
+            if _init_future is not None and _init_future.done():
+                _init_future = None
+        except Exception:
+            pass
+        return False
+    finally:
+        _init_lock.release()
 
 
 def ensure_webhook():
@@ -234,8 +316,8 @@ def ensure_webhook():
         _setup_in_progress = True
         logger.info("Starting webhook setup...")
         
-        if not ensure_app_started():
-            logger.error("Failed to start Telegram app")
+        if not ensure_app_initialized():
+            logger.error("Failed to initialize Telegram app")
             return False
         
         _run_coroutine(setup_webhook(), timeout=30)
@@ -284,7 +366,10 @@ def webhook():
     Webhook endpoint לקבלת עדכונים מטלגרם
     """
     try:
-        ensure_app_started()
+        # If we can't initialize, return 503 so Telegram retries later
+        if not ensure_app_initialized():
+            return jsonify({"ok": False, "error": "bot_not_ready"}), 503
+
         json_data = request.get_json(force=True)
         update = Update.de_json(json_data, telegram_app.bot)
         logger.info("📩 Webhook update received: %s", update.update_id)
@@ -354,7 +439,7 @@ def set_webhook_route():
 
 
 async def _get_webhook_info():
-    await _start_telegram_app()
+    await _initialize_telegram_app()
     return await asyncio.wait_for(
         telegram_app.bot.get_webhook_info(),
         timeout=5
@@ -367,7 +452,8 @@ def webhook_info():
     מידע על ה-webhook הנוכחי
     """
     try:
-        ensure_app_started()
+        if not ensure_app_initialized():
+            return jsonify({"error": "bot_not_ready"}), 503
         info = _run_coroutine(_get_webhook_info(), timeout=10)
         return jsonify({
             "url": _mask_webhook_url(info.url) if info.url else info.url,
