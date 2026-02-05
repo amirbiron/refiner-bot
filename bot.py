@@ -28,6 +28,63 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+# Common trailing punctuation that often sticks to pasted URLs in text
+_URL_TRAILING_PUNCT = '.,!?:;)]}>\'"'
+
+
+def extract_last_url_and_clean_text(text: str) -> tuple[str, str | None]:
+    """
+    Extract only the last URL in the text and remove it from the returned text.
+    Keeps any trailing punctuation (e.g. ')' or '.') in the text.
+    """
+    matches = list(re.finditer(r"https?://\S+", text))
+    if not matches:
+        return text, None
+
+    m = matches[-1]
+    raw = m.group(0)
+    url = raw.rstrip(_URL_TRAILING_PUNCT)
+    if not url:
+        return text, None
+
+    trailing = raw[len(url):]  # punctuation stripped from the URL
+    cleaned = text[:m.start()] + trailing + text[m.end():]
+
+    # light cleanup without changing the content structure
+    cleaned = re.sub(r"[ \t]+\n", "\n", cleaned)
+    cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+    cleaned = cleaned.strip()
+    # Avoid returning empty text (Telegram doesn't allow empty messages)
+    if not cleaned:
+        return text, None
+    return cleaned, url
+
+
+def source_button_label(url: str) -> str:
+    u = url.lower()
+    if "github.com" in u:
+        return "💻 קוד המקור ב-GitHub"
+    if "youtube.com" in u or "youtu.be" in u:
+        return "📺 לצפייה בסרטון"
+    return "🔗 לצפייה במקור"
+
+
+def build_source_keyboard(url: str | None) -> InlineKeyboardMarkup | None:
+    """Keyboard for a single external source URL (no callbacks)."""
+    if not url:
+        return None
+    return InlineKeyboardMarkup([[InlineKeyboardButton(source_button_label(url), url=url)]])
+
+
+def compose_draft_for_copy(text: str, source_url: str | None) -> str:
+    """Draft text for copy/paste, optionally appending the source URL at the end."""
+    if not source_url:
+        return text
+    if not text.strip():
+        return source_url
+    return f"{text.rstrip()}\n\n{source_url}"
+
+
 # טעינת משתני סביבה
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -123,6 +180,21 @@ def build_publish_keyboard(is_edit_mode: bool = False) -> InlineKeyboardMarkup:
             [InlineKeyboardButton("📋 שלח טיוטה להעתקה", callback_data="send_draft_copy")],
         ]
     return InlineKeyboardMarkup(keyboard)
+
+
+def build_preview_keyboard(
+    *,
+    is_edit_mode: bool = False,
+    source_url: str | None = None,
+) -> InlineKeyboardMarkup:
+    """Preview keyboard: optional source link button + existing publish controls."""
+    rows = []
+    if source_url:
+        rows.append([InlineKeyboardButton(source_button_label(source_url), url=source_url)])
+
+    publish_rows = build_publish_keyboard(is_edit_mode=is_edit_mode).inline_keyboard
+    rows.extend(publish_rows)
+    return InlineKeyboardMarkup(rows)
 
 
 # הפרומפט המושלם לשכתוב
@@ -274,6 +346,7 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     if context.user_data.get("awaiting_manual_edit"):
         context.user_data["awaiting_manual_edit"] = False
         context.user_data.pop("last_refined_text_before_edit", None)
+        context.user_data.pop("last_source_url_before_edit", None)
     
     reporter.report_activity(user.id)
     
@@ -292,10 +365,12 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
         # שכתוב הטקסט
         original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
-        reply_markup = build_publish_keyboard(is_edit_mode=False)
+        refined_text, source_url = extract_last_url_and_clean_text(refined_text)
+        reply_markup = build_preview_keyboard(is_edit_mode=False, source_url=source_url)
         
         # שמירת הטקסט המשוכתב ב-context
         context.user_data['last_refined_text'] = refined_text
+        context.user_data['last_source_url'] = source_url
         context.user_data['refined_at'] = datetime.now()
         
         # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
@@ -368,13 +443,15 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         if not edited_text:
             await message.reply_text("⚠️ לא התקבל טקסט לעריכה. נסה לשלוח שוב.")
             return
-
+        edited_text, source_url = extract_last_url_and_clean_text(edited_text)
         context.user_data["last_refined_text"] = edited_text
+        context.user_data["last_source_url"] = source_url
         context.user_data["edited_at"] = datetime.now()
         context.user_data["awaiting_manual_edit"] = False
         context.user_data.pop("last_refined_text_before_edit", None)
+        context.user_data.pop("last_source_url_before_edit", None)
 
-        reply_markup = build_publish_keyboard(is_edit_mode=False)
+        reply_markup = build_preview_keyboard(is_edit_mode=False, source_url=source_url)
         try:
             html_text = f"✅ עודכן הטקסט לפרסום:\n\n{markdown_to_html(edited_text)}"
             await message.reply_text(html_text, reply_markup=reply_markup, parse_mode="HTML")
@@ -411,10 +488,12 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
         # שכתוב הטקסט
         original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
-        reply_markup = build_publish_keyboard(is_edit_mode=False)
+        refined_text, source_url = extract_last_url_and_clean_text(refined_text)
+        reply_markup = build_preview_keyboard(is_edit_mode=False, source_url=source_url)
         
         # שמירת הטקסט המשוכתב ב-context
         context.user_data['last_refined_text'] = refined_text
+        context.user_data['last_source_url'] = source_url
         context.user_data['refined_at'] = datetime.now()
         
         # שליחת התוצאה עם HTML formatting (המרה מ-Markdown)
@@ -472,6 +551,7 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
     if context.user_data.get("awaiting_manual_edit"):
         context.user_data["awaiting_manual_edit"] = False
         context.user_data.pop("last_refined_text_before_edit", None)
+        context.user_data.pop("last_source_url_before_edit", None)
     
     # בדיקה שיש ערוץ מוגדר
     if not CHANNEL_USERNAME:
@@ -483,6 +563,7 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
     
     # בדיקה שיש טקסט שמור
     refined_text = context.user_data.get('last_refined_text')
+    source_url = context.user_data.get('last_source_url')
     if not refined_text:
         await query.edit_message_text(
             "⚠️ לא נמצא טקסט לפרסום.\n"
@@ -498,13 +579,15 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
             await context.bot.send_message(
                 chat_id=CHANNEL_USERNAME,
                 text=html_text,
+                reply_markup=build_source_keyboard(source_url),
                 parse_mode="HTML"
             )
         except Exception as html_err:
             logger.debug(f"HTML parsing failed for channel, sending plain: {html_err}")
             await context.bot.send_message(
                 chat_id=CHANNEL_USERNAME,
-                text=refined_text
+                text=refined_text,
+                reply_markup=build_source_keyboard(source_url),
             )
         
         await query.edit_message_text(
@@ -540,12 +623,18 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
         return
 
     context.user_data["last_refined_text_before_edit"] = refined_text
+    context.user_data["last_source_url_before_edit"] = context.user_data.get("last_source_url")
     context.user_data["awaiting_manual_edit"] = True
     context.user_data["manual_edit_started_at"] = datetime.now()
 
     # עדכון המקלדת על גבי הודעת התצוגה כדי להציע ביטול/פרסום בלי עריכה
     try:
-        await query.edit_message_reply_markup(reply_markup=build_publish_keyboard(is_edit_mode=True))
+        await query.edit_message_reply_markup(
+            reply_markup=build_preview_keyboard(
+                is_edit_mode=True,
+                source_url=context.user_data.get("last_source_url"),
+            )
+        )
     except Exception as e:
         logger.debug(f"Could not edit reply markup for edit mode: {e}")
 
@@ -560,7 +649,12 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
 
     # שליחת הטיוטה עצמה להעתקה בתוך בלוק קוד
     # כך copy-paste שומר על הסימונים כמו **bold** ולא “נבלע” ע״י טלגרם
-    await query.message.reply_text(text_to_pre_html(refined_text), parse_mode="HTML")
+    await query.message.reply_text(
+        text_to_pre_html(
+            compose_draft_for_copy(refined_text, context.user_data.get("last_source_url"))
+        ),
+        parse_mode="HTML",
+    )
 
 
 async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -575,8 +669,12 @@ async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT
             "⚠️ לא נמצאה טיוטה לשליחה. אנא שלח/forward הודעה כדי ליצור גרסה משוכתבת."
         )
         return
-
-    await query.message.reply_text(text_to_pre_html(refined_text), parse_mode="HTML")
+    await query.message.reply_text(
+        text_to_pre_html(
+            compose_draft_for_copy(refined_text, context.user_data.get("last_source_url"))
+        ),
+        parse_mode="HTML",
+    )
 
 
 async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -587,12 +685,19 @@ async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFA
 
     context.user_data["awaiting_manual_edit"] = False
     before = context.user_data.pop("last_refined_text_before_edit", None)
+    before_url = context.user_data.pop("last_source_url_before_edit", None)
     if before:
         context.user_data["last_refined_text"] = before
+        context.user_data["last_source_url"] = before_url
 
     # חזרה למקלדת הרגילה על הודעת התצוגה
     try:
-        await query.edit_message_reply_markup(reply_markup=build_publish_keyboard(is_edit_mode=False))
+        await query.edit_message_reply_markup(
+            reply_markup=build_preview_keyboard(
+                is_edit_mode=False,
+                source_url=context.user_data.get("last_source_url"),
+            )
+        )
     except Exception as e:
         logger.debug(f"Could not restore reply markup after cancel: {e}")
 
