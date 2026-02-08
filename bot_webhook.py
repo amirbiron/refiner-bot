@@ -135,7 +135,7 @@ def _build_telegram_app():
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
-    message_text_filter = (filters.TEXT | filters.Caption) & ~filters.COMMAND
+    message_text_filter = (filters.TEXT | filters.CAPTION) & ~filters.COMMAND
     app.add_handler(MessageHandler(
         filters.FORWARDED & message_text_filter,
         handle_forwarded_message
