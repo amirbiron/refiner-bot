@@ -197,6 +197,13 @@ def build_preview_keyboard(
     return InlineKeyboardMarkup(rows)
 
 
+def get_message_text_or_caption(message) -> str | None:
+    """Return text from message or caption (for media)."""
+    if message is None:
+        return None
+    return message.text or message.caption
+
+
 # הפרומפט המושלם לשכתוב
 REFINER_PROMPT = """אתה עוזר מקצועי לשכתוב תוכן לערוצי טלגרם בעברית.
 
@@ -270,7 +277,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ערוץ היעד הנוכחי: `{channel}`
 
 💡 **טיפים:**
-• הבוט עובד רק עם טקסט (לא תמונות/וידאו)
+• הבוט עובד עם טקסט וגם עם כיתוב של תמונה/וידאו
 • השכתוב משמר את כל המידע החשוב
 • קרדיטים ומקורות מוסרים אוטומטית
 
@@ -350,11 +357,12 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     reporter.report_activity(user.id)
     
+    original_text = get_message_text_or_caption(message)
     # בדיקה שיש טקסט
-    if not message.text:
+    if not original_text:
         await message.reply_text(
             "⚠️ אני יכול לעבוד רק עם טקסט.\n"
-            "אנא forward הודעת טקסט."
+            "אנא forward הודעת טקסט או הודעת תמונה עם כיתוב."
         )
         return
     
@@ -363,7 +371,6 @@ async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT
     
     try:
         # שכתוב הטקסט
-        original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
         refined_text, source_url = extract_last_url_and_clean_text(refined_text)
         reply_markup = build_preview_keyboard(is_edit_mode=False, source_url=source_url)
@@ -439,7 +446,7 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
 
     # אם אנחנו במצב "עריכה לפני פרסום" - ההודעה הזו נחשבת כטקסט הסופי לפרסום
     if context.user_data.get("awaiting_manual_edit"):
-        edited_text = (message.text or "").strip()
+        edited_text = (get_message_text_or_caption(message) or "").strip()
         if not edited_text:
             await message.reply_text("⚠️ לא התקבל טקסט לעריכה. נסה לשלוח שוב.")
             return
@@ -463,30 +470,30 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
             )
         return
     
+    original_text = get_message_text_or_caption(message)
     # בדיקה שיש טקסט
-    if not message.text:
+    if not original_text:
         await message.reply_text(
             "⚠️ אני יכול לעבוד רק עם טקסט.\n"
-            "אנא שלח הודעת טקסט."
+            "אנא שלח הודעת טקסט או הודעת תמונה עם כיתוב."
         )
         return
     
     # בדיקה שהטקסט מספיק ארוך לשכתוב
-    if len(message.text.strip()) < 10:
+    if len(original_text.strip()) < 10:
         await message.reply_text(
             "⚠️ הטקסט קצר מדי לשכתוב.\n"
             "אנא שלח טקסט ארוך יותר (לפחות 10 תווים)."
         )
         return
     
-    logger.info(f"📝 Processing regular text of length: {len(message.text)}")
+    logger.info(f"📝 Processing regular text of length: {len(original_text)}")
     
     # הודעת המתנה
     processing_msg = await message.reply_text("⏳ משכתב את הטקסט עם AI...")
     
     try:
         # שכתוב הטקסט
-        original_text = message.text
         refined_text = await refine_text_with_gemini(original_text)
         refined_text, source_url = extract_last_url_and_clean_text(refined_text)
         reply_markup = build_preview_keyboard(is_edit_mode=False, source_url=source_url)
@@ -742,13 +749,14 @@ def main():
     # הוספת handlers
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
+    message_text_filter = (filters.TEXT | filters.Caption) & ~filters.COMMAND
     app.add_handler(MessageHandler(
-        filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
+        filters.FORWARDED & message_text_filter,
         handle_forwarded_message
     ))
     # Handler for regular text messages (not forwarded)
     app.add_handler(MessageHandler(
-        ~filters.FORWARDED & filters.TEXT & ~filters.COMMAND,
+        ~filters.FORWARDED & message_text_filter,
         handle_regular_text_message
     ))
     app.add_handler(CallbackQueryHandler(
