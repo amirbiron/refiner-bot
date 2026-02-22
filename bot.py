@@ -62,11 +62,36 @@ def extract_last_url_and_clean_text(text: str) -> tuple[str, str | None]:
 
 def source_button_label(url: str) -> str:
     u = url.lower()
-    if "github.com" in u:
-        return "💻 קוד המקור ב-GitHub"
-    if "youtube.com" in u or "youtu.be" in u:
+
+    # Code repositories
+    if any(d in u for d in ("github.com", "gitlab.com", "bitbucket.org")):
+        return "💻 לקוד המקור"
+
+    # Video platforms
+    if any(d in u for d in ("youtube.com", "youtu.be", "vimeo.com")):
         return "📺 לצפייה בסרטון"
-    return "🔗 לצפייה במקור"
+
+    # AI tools & products
+    if any(d in u for d in (
+        "huggingface.co", "chat.openai.com", "chatgpt.com",
+        "gemini.google.com", "claude.ai", "bard.google.com",
+        "midjourney.com", "replicate.com",
+    )) or re.search(r"https?://[^/]*\.ai(?:/|$)", u):
+        return "🤖 להתנסות בכלי"
+
+    # App stores
+    if any(d in u for d in ("play.google.com", "apps.apple.com")):
+        return "📱 להורדת האפליקציה"
+
+    # Social media / forums
+    if any(d in u for d in (
+        "twitter.com", "x.com", "linkedin.com", "reddit.com",
+        "facebook.com", "instagram.com", "threads.net",
+    )):
+        return "📝 לפוסט המקורי"
+
+    # Neutral default
+    return "🔗 למעבר לקישור"
 
 
 def build_source_keyboard(url: str | None) -> InlineKeyboardMarkup | None:
