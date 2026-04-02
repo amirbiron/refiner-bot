@@ -9,6 +9,7 @@ import html
 import logging
 from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.error import BadRequest
 from telegram.ext import (
     Application,
     MessageHandler,
@@ -571,13 +572,24 @@ async def handle_regular_text_message(update: Update, context: ContextTypes.DEFA
                 logger.error(f"Could not send error reply: {reply_err}")
 
 
+async def _safe_answer_callback(query) -> None:
+    """Answer a callback query, ignoring 'query too old' errors."""
+    try:
+        await query.answer()
+    except BadRequest as e:
+        if "query is too old" in str(e).lower() or "query id is invalid" in str(e).lower():
+            logger.debug(f"Callback query expired, continuing: {e}")
+        else:
+            raise
+
+
 async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     טיפול בלחיצה על כפתור "פרסם לערוץ"
     """
     reporter.report_activity(update.effective_user.id)
     query = update.callback_query
-    await query.answer()
+    await _safe_answer_callback(query)
 
     # בכל פרסום נוודא שאנחנו לא נשארים "תקועים" במצב עריכה
     if context.user_data.get("awaiting_manual_edit"):
@@ -644,7 +656,7 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
     """
     reporter.report_activity(update.effective_user.id)
     query = update.callback_query
-    await query.answer()
+    await _safe_answer_callback(query)
 
     refined_text = context.user_data.get("last_refined_text")
     if not refined_text:
@@ -693,7 +705,7 @@ async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT
     """שליחת הטיוטה הנוכחית להעתקה (כדי להקל על עריכה ידנית)."""
     reporter.report_activity(update.effective_user.id)
     query = update.callback_query
-    await query.answer()
+    await _safe_answer_callback(query)
 
     refined_text = context.user_data.get("last_refined_text")
     if not refined_text:
@@ -713,7 +725,7 @@ async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFA
     """ביטול מצב עריכה והחזרה לגרסה לפני העריכה (אם קיימת)."""
     reporter.report_activity(update.effective_user.id)
     query = update.callback_query
-    await query.answer()
+    await _safe_answer_callback(query)
 
     context.user_data["awaiting_manual_edit"] = False
     before = context.user_data.pop("last_refined_text_before_edit", None)
