@@ -3,6 +3,7 @@
 מקבל הודעות forwarded, משכתב אותן עם Gemini AI ומפרסם לערוץ
 """
 
+import asyncio
 import os
 import re
 import html
@@ -587,9 +588,9 @@ async def publish_to_channel_callback(update: Update, context: ContextTypes.DEFA
     """
     טיפול בלחיצה על כפתור "פרסם לערוץ"
     """
-    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await _safe_answer_callback(query)
+    asyncio.get_event_loop().run_in_executor(None, reporter.report_activity, update.effective_user.id)
 
     # בכל פרסום נוודא שאנחנו לא נשארים "תקועים" במצב עריכה
     if context.user_data.get("awaiting_manual_edit"):
@@ -654,9 +655,9 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
     """
     כניסה למצב "עריכה לפני פרסום" - המשתמש ישלח הודעת טקסט חדשה שתשמש כגרסה הסופית לפרסום.
     """
-    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await _safe_answer_callback(query)
+    asyncio.get_event_loop().run_in_executor(None, reporter.report_activity, update.effective_user.id)
 
     refined_text = context.user_data.get("last_refined_text")
     if not refined_text:
@@ -703,9 +704,9 @@ async def edit_before_publish_callback(update: Update, context: ContextTypes.DEF
 
 async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """שליחת הטיוטה הנוכחית להעתקה (כדי להקל על עריכה ידנית)."""
-    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await _safe_answer_callback(query)
+    asyncio.get_event_loop().run_in_executor(None, reporter.report_activity, update.effective_user.id)
 
     refined_text = context.user_data.get("last_refined_text")
     if not refined_text:
@@ -723,9 +724,9 @@ async def send_draft_copy_callback(update: Update, context: ContextTypes.DEFAULT
 
 async def cancel_manual_edit_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """ביטול מצב עריכה והחזרה לגרסה לפני העריכה (אם קיימת)."""
-    reporter.report_activity(update.effective_user.id)
     query = update.callback_query
     await _safe_answer_callback(query)
+    asyncio.get_event_loop().run_in_executor(None, reporter.report_activity, update.effective_user.id)
 
     context.user_data["awaiting_manual_edit"] = False
     before = context.user_data.pop("last_refined_text_before_edit", None)
