@@ -449,8 +449,12 @@ async def refine_text_with_gemini(original_text: str) -> str:
         logger.error(f"❌ Gemini API error: {gemini_error}")
 
         if not OPENAI_API_KEY:
+            logger.warning(
+                "⚠️ GPT fallback skipped - OPENAI_API_KEY is not set in environment."
+            )
             raise
 
+        logger.warning("🔁 Gemini failed - attempting GPT fallback...")
         try:
             return await refine_text_with_gpt(original_text)
         except Exception as gpt_error:
@@ -879,6 +883,10 @@ def main():
         raise ValueError("❌ GEMINI_API_KEY not set in environment!")
     
     logger.info("🤖 Starting Refiner Bot...")
+    if OPENAI_API_KEY:
+        logger.info(f"✅ GPT fallback is ENABLED (model: {OPENAI_MODEL})")
+    else:
+        logger.info("ℹ️ GPT fallback is DISABLED (OPENAI_API_KEY not set)")
     
     # יצירת Application
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
