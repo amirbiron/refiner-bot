@@ -5,7 +5,7 @@ python-telegram-bot==22.6
 google-genai==1.60.0
 
 # OpenAI SDK - used as a fallback when Gemini is unavailable
-openai==1.55.0
+openai==1.58.1
 
 # MongoDB Driver (optional - for future features)
 pymongo==4.16.0
