@@ -28,6 +28,16 @@ GEMINI_TOP_K = int(os.getenv("GEMINI_TOP_K", "40"))
 GEMINI_MAX_TOKENS = int(os.getenv("GEMINI_MAX_TOKENS", "8192"))  # הוגדל לתמיכה בטקסטים ארוכים
 
 # ======================
+# OpenAI Fallback Configuration
+# ======================
+# אם Gemini נכשל (למשל תקלה בצד של גוגל), הבוט ינסה להשתמש ב-GPT כגיבוי.
+# אם OPENAI_API_KEY לא מוגדר - הגיבוי פשוט מושבת.
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
+
+# ======================
 # MongoDB Configuration (Optional)
 # ======================
 MONGODB_URI = os.getenv("MONGODB_URI")

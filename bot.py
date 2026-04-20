@@ -117,6 +117,12 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 CHANNEL_USERNAME = os.getenv("CHANNEL_USERNAME")  # לדוגמה: @my_channel
 
+# OpenAI fallback - משמש רק אם Gemini נכשל
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.7"))
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "8192"))
+
 reporter = create_reporter(
     mongodb_uri="mongodb+srv://mumin:M43M2TFgLfGvhBwY@muminai.tm6x81b.mongodb.net/?retryWrites=true&w=majority&appName=muminAI",
     service_id="srv-d5sttel6ubrc73c3b24g",
@@ -158,6 +164,40 @@ def _get_gemini_client():
 def get_gemini_client():
     """Public function to get the Gemini client"""
     return _get_gemini_client()
+
+
+# Lazy initialization של OpenAI client (fallback) - מאותחל רק בשימוש הראשון
+_openai_client = None
+_openai_client_lock = None
+
+
+def _get_openai_client():
+    """
+    מחזיר את ה-OpenAI client, מאתחל אותו אם צריך (lazy initialization).
+    מחזיר None אם OPENAI_API_KEY לא מוגדר או שה-SDK לא מותקן.
+    """
+    global _openai_client, _openai_client_lock
+
+    if not OPENAI_API_KEY:
+        return None
+
+    if _openai_client_lock is None:
+        import threading
+        _openai_client_lock = threading.Lock()
+
+    if _openai_client is None:
+        with _openai_client_lock:
+            if _openai_client is None:
+                try:
+                    from openai import OpenAI
+                    logger.info("🔄 Initializing OpenAI fallback client...")
+                    _openai_client = OpenAI(api_key=OPENAI_API_KEY)
+                    logger.info("✅ OpenAI fallback client initialized successfully")
+                except Exception as e:
+                    logger.error(f"❌ Failed to initialize OpenAI fallback: {e}")
+                    return None
+
+    return _openai_client
 
 def markdown_to_html(text: str) -> str:
     """
@@ -321,16 +361,58 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def refine_text_with_gpt(original_text: str) -> str:
+    """
+    שכתוב טקסט באמצעות OpenAI GPT - משמש כ-fallback אם Gemini נכשל.
+    """
+    client = _get_openai_client()
+    if client is None:
+        raise RuntimeError("OpenAI fallback is not configured (OPENAI_API_KEY missing).")
+
+    logger.info(
+        f"🔁 Using GPT fallback ({OPENAI_MODEL}) for text of length: {len(original_text)}"
+    )
+
+    prompt = REFINER_PROMPT.format(original_text=original_text)
+
+    def _call_openai():
+        return client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=OPENAI_TEMPERATURE,
+            max_tokens=OPENAI_MAX_TOKENS,
+        )
+
+    # ה-SDK של OpenAI סינכרוני - מריצים ב-thread כדי לא לחסום את ה-event loop
+    response = await asyncio.to_thread(_call_openai)
+
+    choice = response.choices[0]
+    refined_text = (choice.message.content or "").strip()
+
+    if not refined_text:
+        raise RuntimeError("OpenAI returned an empty response.")
+
+    finish_reason = getattr(choice, "finish_reason", None)
+    if finish_reason == "length":
+        logger.warning("⚠️ GPT response was truncated due to length limit")
+        refined_text += "\n\n⚠️ [הטקסט נחתך - המקור ארוך מדי]"
+
+    logger.info(f"✅ GPT fallback refinement successful, output length: {len(refined_text)}")
+    return refined_text
+
+
 async def refine_text_with_gemini(original_text: str) -> str:
     """
-    שכתוב טקסט באמצעות Gemini API
+    שכתוב טקסט באמצעות Gemini API.
+    אם Gemini נכשל (למשל תקלה בצד גוגל), ננסה אוטומטית fallback ל-GPT
+    - רק אם OPENAI_API_KEY מוגדר. אחרת נעיף את השגיאה המקורית.
     """
     try:
         logger.info(f"📝 Starting refinement for text of length: {len(original_text)}")
-        
+
         # Get the Gemini client (lazy initialization)
         client = _get_gemini_client()
-        
+
         # קריאה ל-Gemini API
         # max_output_tokens גבוה יותר לתמיכה בטקסטים ארוכים
         response = client.models.generate_content(
@@ -343,9 +425,13 @@ async def refine_text_with_gemini(original_text: str) -> str:
                 max_output_tokens=8192,  # הגדלה משמעותית לתמיכה בטקסטים ארוכים
             )
         )
-        
-        refined_text = response.text.strip()
-        
+
+        refined_text = (response.text or "").strip()
+
+        if not refined_text:
+            # Gemini מחזיר לפעמים תשובה ריקה כשיש בעיה בצד שלו - נחשיב כשגיאה
+            raise RuntimeError("Gemini returned an empty response.")
+
         # בדיקה אם התשובה נחתכה
         if hasattr(response, 'candidates') and response.candidates:
             candidate = response.candidates[0]
@@ -354,14 +440,23 @@ async def refine_text_with_gemini(original_text: str) -> str:
                 if 'MAX_TOKENS' in finish_reason or 'LENGTH' in finish_reason:
                     logger.warning(f"⚠️ Response was truncated due to: {finish_reason}")
                     refined_text += "\n\n⚠️ [הטקסט נחתך - המקור ארוך מדי]"
-        
+
         logger.info(f"✅ Refinement successful, output length: {len(refined_text)}")
-        
+
         return refined_text
-        
-    except Exception as e:
-        logger.error(f"❌ Gemini API error: {e}")
-        raise
+
+    except Exception as gemini_error:
+        logger.error(f"❌ Gemini API error: {gemini_error}")
+
+        if not OPENAI_API_KEY:
+            raise
+
+        try:
+            return await refine_text_with_gpt(original_text)
+        except Exception as gpt_error:
+            logger.error(f"❌ GPT fallback also failed: {gpt_error}")
+            # מחזירים את שגיאת Gemini המקורית כדי לא להסתיר את הסיבה האמיתית
+            raise gemini_error
 
 
 async def handle_forwarded_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
