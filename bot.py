@@ -367,7 +367,11 @@ async def refine_text_with_gpt(original_text: str) -> str:
     """
     client = _get_openai_client()
     if client is None:
-        raise RuntimeError("OpenAI fallback is not configured (OPENAI_API_KEY missing).")
+        if not OPENAI_API_KEY:
+            raise RuntimeError("OpenAI fallback is not configured (OPENAI_API_KEY missing).")
+        raise RuntimeError(
+            "OpenAI fallback client failed to initialize - see previous log for details."
+        )
 
     logger.info(
         f"🔁 Using GPT fallback ({OPENAI_MODEL}) for text of length: {len(original_text)}"
